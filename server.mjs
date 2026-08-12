@@ -6,7 +6,7 @@ import { join, extname, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getState, save, resetDemo, newId, logActivity } from './lib/store.mjs';
 import { buildSummary, computeFindings } from './lib/insights.mjs';
-import { testConnection, syncTenant } from './lib/graph.mjs';
+import { testConnection, syncTenant, scanSharing } from './lib/graph.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, 'public');
@@ -371,6 +371,7 @@ route('POST', '/api/graph/sync', async (s) => {
     s.sites = data.sites;
     s.links = data.links;
     s.permissions = data.permissions;
+    if (data.tenantName) s.settings.tenantName = data.tenantName;
     s.settings.demoMode = false;
     s.settings.graph.connected = true;
     s.settings.graph.lastSync = new Date().toISOString();
@@ -380,6 +381,40 @@ route('POST', '/api/graph/sync', async (s) => {
   } catch (err) {
     return { __status: 400, ok: false, error: err.message };
   }
+});
+
+// Sharing-link scan runs in the background (it can take many minutes on
+// large tenants); the frontend polls scan-status until it finishes.
+let scan = { running: false, progress: null, error: null, finishedAt: null, result: null };
+
+route('GET', '/api/graph/scan-status', () => scan);
+
+route('POST', '/api/graph/scan-sharing', (s, _p, _q, body) => {
+  if (scan.running) return { __status: 409, error: 'A scan is already running' };
+  if (s.settings.demoMode) return { __status: 400, error: 'Sync a real tenant first — demo data already includes links' };
+  if (!s.sites.length) return { __status: 400, error: 'No sites to scan. Run "Sync tenant now" first.' };
+  const maxSites = Math.max(1, Number(body.maxSites) || 100);
+  scan = {
+    running: true,
+    progress: { done: 0, total: Math.min(maxSites, s.sites.length), links: 0, site: '', itemsScanned: 0 },
+    error: null, finishedAt: null, result: null,
+  };
+  scanSharing(s.settings.graph, s.sites, { maxSites }, p => {
+    if (p.phase === 'scan' || p.phase === 'done') scan.progress = p;
+    else if (p.phase === 'site-error') console.error('[scan]', p.site, '—', p.error);
+  })
+    .then(r => {
+      s.links = r.links;
+      scan.result = r;
+      logActivity('Sharing scan completed',
+        `${r.links.length} sharing link(s) found across ${r.sitesScanned} site(s), ${r.itemsScanned} items inspected` +
+        (r.truncatedDrives ? ` (${r.truncatedDrives} very large librar${r.truncatedDrives === 1 ? 'y' : 'ies'} truncated)` : ''),
+        'System');
+      save();
+    })
+    .catch(err => { scan.error = err.message; })
+    .finally(() => { scan.running = false; scan.finishedAt = new Date().toISOString(); });
+  return { ok: true, started: true };
 });
 
 route('POST', '/api/demo/reset', () => {

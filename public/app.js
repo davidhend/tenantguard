@@ -603,6 +603,18 @@ async function pageSettings() {
           <button class="btn" id="t-save">Save thresholds</button>
         </div>
         <div class="card mt">
+          <h2>Sharing link scan</h2>
+          <p class="muted" style="font-size:12.5px;margin-top:0">
+            Walks every document library on synced sites to find sharing links.
+            Graph has no bulk endpoint for this, so it can take a while — scope it
+            with the site limit and raise it for full coverage.
+          </p>
+          <div class="field"><label>Sites to scan (from the top of the Sites list)</label>
+            <input type="number" id="scan-max" value="100" min="1"></div>
+          <button class="btn primary" id="scan-start">Scan sharing links</button>
+          <p class="muted" id="scan-progress" style="font-size:12px;margin-bottom:0"></p>
+        </div>
+        <div class="card mt">
           <h2>Demo data</h2>
           <p class="muted" style="font-size:12.5px;margin-top:0">Currently ${s.demoMode ? 'showing the seeded demo tenant' : 'showing synced tenant data'}.</p>
           <button class="btn danger" onclick="act('/api/demo/reset','Reset all data back to the original demo tenant?','Demo data reset')">Reset demo data</button>
@@ -637,6 +649,15 @@ async function pageSettings() {
       render();
     } catch (err) { toast(err.message, true); }
   });
+  document.getElementById('scan-start').addEventListener('click', async () => {
+    try {
+      await api('/api/graph/scan-sharing', { method: 'POST', body: { maxSites: Number(document.getElementById('scan-max').value) || 100 } });
+      toast('Scan started');
+      pollScan();
+    } catch (err) { toast(err.message, true); }
+  });
+  pollScan(true); // resume progress display if a scan is already running
+
   document.getElementById('t-save').addEventListener('click', async () => {
     await api('/api/settings', {
       method: 'PUT',
@@ -644,6 +665,31 @@ async function pageSettings() {
     });
     toast('Thresholds saved'); render();
   });
+}
+
+// Poll the background sharing scan and mirror progress into the Settings page.
+let scanTimer = null;
+async function pollScan(silentIfIdle = false) {
+  clearInterval(scanTimer);
+  const tick = async () => {
+    const el = document.getElementById('scan-progress');
+    if (!el) { clearInterval(scanTimer); return false; } // navigated away
+    let st;
+    try { st = await api('/api/graph/scan-status'); } catch { return false; }
+    if (st.running) {
+      const p = st.progress ?? {};
+      el.textContent = `Scanning ${p.done ?? 0}/${p.total ?? '?'} sites — ${p.links ?? 0} links found, ${p.itemsScanned ?? 0} items inspected${p.site ? ` — now: ${p.site}` : ''}`;
+      return true;
+    }
+    clearInterval(scanTimer);
+    if (st.error) { el.textContent = `Scan failed: ${st.error}`; toast(st.error, true); }
+    else if (st.result) {
+      el.textContent = `Last scan: ${st.result.links.length} links across ${st.result.sitesScanned} sites (${st.result.itemsScanned} items).`;
+      if (!silentIfIdle) toast(`Scan finished — ${st.result.links.length} sharing links found`);
+    } else if (!silentIfIdle) el.textContent = '';
+    return false;
+  };
+  if (await tick()) scanTimer = setInterval(tick, 2000);
 }
 
 // ---------- router ----------

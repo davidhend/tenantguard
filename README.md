@@ -58,9 +58,22 @@ TenantGuard talks to Microsoft Graph directly (plain REST, no SDK) using an
 5. In TenantGuard → **Settings**, paste the **Tenant ID**, **Client ID** (both on the app's Overview page) and the secret, then **Test connection** and **Sync tenant now**.
 
 Sync is **read-only** against your tenant: it pulls users, groups (with
-owners/members/guests), and sites. Remediation buttons update the local model —
-wiring them to Graph write calls (remove guest, revoke link) is straightforward
-in `lib/graph.mjs` if you want real enforcement, but read-only is the safe default.
+owners/members/guests), and **all** sites (via `/sites/getAllSites`), and derives
+per-site "who has access" from group ownership/membership. Remediation buttons
+update the local model — wiring them to Graph write calls (remove guest, revoke
+link) is straightforward in `lib/graph.mjs` if you want real enforcement, but
+read-only is the safe default.
+
+### Sharing links on a real tenant
+
+Microsoft Graph has no "list all sharing links" endpoint — finding them requires
+walking every document library. After syncing, use **Settings → Sharing link
+scan**: it enumerates drive items (delta queries) on the first *N* sites of your
+Sites list (default 100 — raise it for full coverage), inspects every shared
+item's permissions, and populates the Sharing links page. The scan runs in the
+background with live progress; expect minutes-to-hours on very large tenants.
+Very large libraries are truncated at 50,000 items per drive and reported in the
+activity log — nothing is dropped silently.
 
 ## Configuration
 
