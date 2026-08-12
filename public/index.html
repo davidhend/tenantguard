@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TenantGuard — Microsoft 365 governance</title>
+  <link rel="stylesheet" href="/styles.css">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%232a78d6' d='M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5l8-3z'/%3E%3C/svg%3E">
+</head>
+<body>
+  <div class="layout">
+    <aside class="sidebar">
+      <div class="brand">
+        <svg viewBox="0 0 24 24" width="26" height="26" aria-hidden="true"><path fill="currentColor" d="M12 2l8 3v6c0 5-3.4 9.4-8 11-4.6-1.6-8-6-8-11V5l8-3z"/></svg>
+        <span>TenantGuard</span>
+      </div>
+      <nav id="nav">
+        <a href="#/" data-page="dashboard">Dashboard</a>
+        <a href="#/sites" data-page="sites">Sites</a>
+        <a href="#/groups" data-page="groups">Teams &amp; Groups</a>
+        <a href="#/guests" data-page="guests">Guests</a>
+        <a href="#/links" data-page="links">Sharing links</a>
+        <a href="#/reviews" data-page="reviews">Access reviews</a>
+        <a href="#/policies" data-page="policies">Policies</a>
+        <a href="#/activity" data-page="activity">Activity</a>
+        <a href="#/settings" data-page="settings">Settings</a>
+      </nav>
+      <div class="sidebar-foot">
+        <span id="tenant-badge" class="badge badge-demo">demo</span>
+        <span id="tenant-name" class="tenant-name"></span>
+      </div>
+    </aside>
+    <main id="main" class="main" aria-live="polite"></main>
+  </div>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="toast-root" role="status"></div>
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

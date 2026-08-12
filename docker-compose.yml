@@ -1,0 +1,11 @@
+services:
+  tenantguard:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - tenantguard-data:/data
+    restart: unless-stopped
+
+volumes:
+  tenantguard-data:
