@@ -406,9 +406,13 @@ route('POST', '/api/graph/scan-sharing', (s, _p, _q, body) => {
     .then(r => {
       s.links = r.links;
       scan.result = r;
-      logActivity('Sharing scan completed',
-        `${r.links.length} sharing link(s) found across ${r.sitesScanned} site(s), ${r.itemsScanned} items inspected` +
-        (r.truncatedDrives ? ` (${r.truncatedDrives} very large librar${r.truncatedDrives === 1 ? 'y' : 'ies'} truncated)` : ''),
+      const caveats = [
+        r.sitesFailed ? `${r.sitesFailed} site(s) FAILED — coverage is incomplete (first error: ${r.errors[0] ?? 'see server log'})` : '',
+        r.truncatedDrives ? `${r.truncatedDrives} very large librar${r.truncatedDrives === 1 ? 'y' : 'ies'} truncated` : '',
+      ].filter(Boolean).join('; ');
+      logActivity(r.sitesFailed ? 'Sharing scan completed WITH ERRORS' : 'Sharing scan completed',
+        `${r.links.length} sharing link(s) found across ${r.sitesScanned - r.sitesFailed}/${r.sitesScanned} site(s), ${r.itemsScanned} items inspected` +
+        (caveats ? ` (${caveats})` : ''),
         'System');
       save();
     })

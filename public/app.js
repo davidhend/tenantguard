@@ -678,14 +678,19 @@ async function pollScan(silentIfIdle = false) {
     try { st = await api('/api/graph/scan-status'); } catch { return false; }
     if (st.running) {
       const p = st.progress ?? {};
-      el.textContent = `Scanning ${p.done ?? 0}/${p.total ?? '?'} sites — ${p.links ?? 0} links found, ${p.itemsScanned ?? 0} items inspected${p.site ? ` — now: ${p.site}` : ''}`;
+      el.textContent = `Scanning ${p.done ?? 0}/${p.total ?? '?'} sites — ${p.links ?? 0} links found, ${p.itemsScanned ?? 0} items inspected`
+        + (p.failed ? `, ${p.failed} sites failed` : '') + (p.site ? ` — now: ${p.site}` : '');
       return true;
     }
     clearInterval(scanTimer);
     if (st.error) { el.textContent = `Scan failed: ${st.error}`; toast(st.error, true); }
     else if (st.result) {
-      el.textContent = `Last scan: ${st.result.links.length} links across ${st.result.sitesScanned} sites (${st.result.itemsScanned} items).`;
-      if (!silentIfIdle) toast(`Scan finished — ${st.result.links.length} sharing links found`);
+      const r = st.result;
+      el.textContent = `Last scan: ${r.links.length} links across ${r.sitesScanned - r.sitesFailed}/${r.sitesScanned} sites (${r.itemsScanned} items).`
+        + (r.sitesFailed ? ` ⚠ ${r.sitesFailed} sites failed — coverage is incomplete. First error: ${r.errors?.[0] ?? 'see server log'}` : '');
+      if (!silentIfIdle) toast(r.sitesFailed
+        ? `Scan finished with ${r.sitesFailed} failed sites — see Settings`
+        : `Scan finished — ${r.links.length} sharing links found`, !!r.sitesFailed);
     } else if (!silentIfIdle) el.textContent = '';
     return false;
   };
