@@ -68,12 +68,24 @@ read-only is the safe default.
 
 Microsoft Graph has no "list all sharing links" endpoint — finding them requires
 walking every document library. After syncing, use **Settings → Sharing link
-scan**: it enumerates drive items (delta queries) on the first *N* sites of your
-Sites list (default 100 — raise it for full coverage), inspects every shared
-item's permissions, and populates the Sharing links page. The scan runs in the
-background with live progress; expect minutes-to-hours on very large tenants.
-Very large libraries are truncated at 50,000 items per drive and reported in the
-activity log — nothing is dropped silently.
+scan**: it enumerates drive items (delta queries), inspects every shared item's
+permissions, and populates the Sharing links page. Built for big tenants:
+
+- **Chunked & resumable** — each run scans up to *N* sites (default 500);
+  finished sites are skipped on the next run and their links kept, so you can
+  cover tens of thousands of sites across several runs. Tick *Rescan
+  already-scanned sites* to start over.
+- **Checkpointed** — results are persisted every 25 sites, and appear on the
+  Sharing links page as the scan progresses. A server restart loses at most 25
+  sites of progress; failed sites are retried on the next run.
+- **Most-active first** — sites are scanned in order of recent activity, so
+  real content (and real risk) surfaces early and dormant auto-provisioned
+  shells wait until the end.
+- **Parallel & throttle-aware** — six sites scan concurrently; Graph 429/503
+  responses are retried honoring Retry-After, and access tokens auto-refresh,
+  so multi-hour scans keep going.
+- Very large libraries are truncated at 50,000 items per drive and reported in
+  the activity log — nothing is dropped silently.
 
 ## Configuration
 

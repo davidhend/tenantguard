@@ -393,32 +393,53 @@ route('POST', '/api/graph/scan-sharing', (s, _p, _q, body) => {
   if (scan.running) return { __status: 409, error: 'A scan is already running' };
   if (s.settings.demoMode) return { __status: 400, error: 'Sync a real tenant first — demo data already includes links' };
   if (!s.sites.length) return { __status: 400, error: 'No sites to scan. Run "Sync tenant now" first.' };
+
+  // Scans are chunked and resumable: completed sites are remembered (and
+  // their links kept), so each run picks up where the last one stopped.
+  if (body.fresh || !s.lastScan) s.lastScan = { scannedSiteIds: [] };
+  const scannedSet = new Set(s.lastScan.scannedSiteIds);
+  const candidates = s.sites
+    .filter(x => !scannedSet.has(x.id))
+    // Most recently active sites first: real content (and real risk) surfaces
+    // early; dormant auto-provisioned shells wait until the end.
+    .sort((a, b) => new Date(b.lastActivity ?? 0) - new Date(a.lastActivity ?? 0));
+  if (!candidates.length) {
+    return { __status: 400, error: 'All sites have already been scanned. Tick "Rescan already-scanned sites" to start over.' };
+  }
+
   const maxSites = Math.max(1, Number(body.maxSites) || 100);
   scan = {
     running: true,
-    progress: { done: 0, total: Math.min(maxSites, s.sites.length), links: 0, site: '', itemsScanned: 0 },
+    progress: { done: 0, total: Math.min(maxSites, candidates.length), links: 0, site: '', itemsScanned: 0 },
     error: null, finishedAt: null, result: null,
   };
-  scanSharing(s.settings.graph, s.sites, { maxSites }, p => {
+  const onCheckpoint = (batch) => {
+    const ids = new Set(batch.map(b => b.siteId));
+    s.links = s.links.filter(l => !ids.has(l.siteId)).concat(batch.flatMap(b => b.links));
+    s.lastScan.scannedSiteIds.push(...batch.map(b => b.siteId));
+    save();
+  };
+  scanSharing(s.settings.graph, candidates, { maxSites, onCheckpoint }, p => {
     if (p.phase === 'scan' || p.phase === 'done') scan.progress = p;
     else if (p.phase === 'site-error') console.error('[scan]', p.site, '—', p.error);
   })
     .then(r => {
-      s.links = r.links;
-      scan.result = r;
+      scan.result = r; // links already merged into state via checkpoints
+      const remaining = s.sites.length - s.lastScan.scannedSiteIds.length;
       const caveats = [
-        r.sitesFailed ? `${r.sitesFailed} site(s) FAILED — coverage is incomplete (first error: ${r.errors[0] ?? 'see server log'})` : '',
+        r.sitesFailed ? `${r.sitesFailed} site(s) failed and will be retried next run (first error: ${r.errors[0] ?? 'see server log'})` : '',
         r.truncatedDrives ? `${r.truncatedDrives} very large librar${r.truncatedDrives === 1 ? 'y' : 'ies'} truncated` : '',
       ].filter(Boolean).join('; ');
-      logActivity(r.sitesFailed ? 'Sharing scan completed WITH ERRORS' : 'Sharing scan completed',
-        `${r.links.length} sharing link(s) found across ${r.sitesScanned - r.sitesFailed}/${r.sitesScanned} site(s), ${r.itemsScanned} items inspected` +
+      logActivity(r.sitesFailed ? 'Sharing scan chunk completed WITH ERRORS' : 'Sharing scan chunk completed',
+        `${r.links.length} link(s) found on ${r.sitesScanned - r.sitesFailed}/${r.sitesScanned} site(s), ${r.itemsScanned} items inspected; ` +
+        `${s.links.filter(l => !l.revoked).length} links known in total, ${remaining} site(s) left to scan` +
         (caveats ? ` (${caveats})` : ''),
         'System');
       save();
     })
     .catch(err => { scan.error = err.message; })
     .finally(() => { scan.running = false; scan.finishedAt = new Date().toISOString(); });
-  return { ok: true, started: true };
+  return { ok: true, started: true, sitesInThisRun: Math.min(maxSites, candidates.length), sitesRemaining: candidates.length };
 });
 
 route('POST', '/api/demo/reset', () => {

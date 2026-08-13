@@ -605,12 +605,18 @@ async function pageSettings() {
         <div class="card mt">
           <h2>Sharing link scan</h2>
           <p class="muted" style="font-size:12.5px;margin-top:0">
-            Walks every document library on synced sites to find sharing links.
-            Graph has no bulk endpoint for this, so it can take a while — scope it
-            with the site limit and raise it for full coverage.
+            Walks every document library on synced sites to find sharing links
+            (Graph has no bulk endpoint for this). Scans run in chunks and are
+            <strong>resumable</strong>: finished sites are skipped next run and
+            their links kept, so a big tenant can be covered across several runs.
+            Most recently active sites are scanned first. Progress is saved every
+            25 sites — a restart loses at most that much.
           </p>
-          <div class="field"><label>Sites to scan (from the top of the Sites list)</label>
-            <input type="number" id="scan-max" value="100" min="1"></div>
+          <div class="field"><label>Sites to scan in this run</label>
+            <input type="number" id="scan-max" value="500" min="1"></div>
+          <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;margin-bottom:10px">
+            <input type="checkbox" id="scan-fresh"> Rescan already-scanned sites (start over)
+          </label>
           <button class="btn primary" id="scan-start">Scan sharing links</button>
           <p class="muted" id="scan-progress" style="font-size:12px;margin-bottom:0"></p>
         </div>
@@ -651,8 +657,14 @@ async function pageSettings() {
   });
   document.getElementById('scan-start').addEventListener('click', async () => {
     try {
-      await api('/api/graph/scan-sharing', { method: 'POST', body: { maxSites: Number(document.getElementById('scan-max').value) || 100 } });
-      toast('Scan started');
+      const r = await api('/api/graph/scan-sharing', {
+        method: 'POST',
+        body: {
+          maxSites: Number(document.getElementById('scan-max').value) || 500,
+          fresh: document.getElementById('scan-fresh').checked,
+        },
+      });
+      toast(`Scan started — ${r.sitesInThisRun} of ${r.sitesRemaining} unscanned sites in this run`);
       pollScan();
     } catch (err) { toast(err.message, true); }
   });
