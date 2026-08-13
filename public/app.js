@@ -385,10 +385,14 @@ async function pageGuests() {
 }
 
 async function pageLinks() {
-  const links = await api('/api/links');
+  let [links, scanSt] = await Promise.all([
+    api('/api/links'),
+    api('/api/graph/scan-status').catch(() => ({ running: false })),
+  ]);
+  let filter = 'all';
   main.innerHTML = `
     <div class="page-head">
-      <div><h1>Sharing links</h1><div class="sub">${links.length} active links · ${links.filter(l => l.type === 'anyone').length} "Anyone" links</div></div>
+      <div><h1>Sharing links</h1><div class="sub" id="links-sub"></div></div>
       <div class="seg" id="link-filter">
         <button class="active" data-f="all">All</button>
         <button data-f="anyone">Anyone</button>
@@ -402,9 +406,14 @@ async function pageLinks() {
     </table></div>`;
 
   const rows = document.getElementById('link-rows');
-  const draw = (f = 'all') => {
+  const sub = document.getElementById('links-sub');
+  const updateSub = (scanning) => {
+    sub.textContent = `${links.length} active links · ${links.filter(l => l.type === 'anyone').length} "Anyone" links`
+      + (scanning ? ' · scan in progress — this page refreshes automatically' : '');
+  };
+  const draw = () => {
     const list = links.filter(l =>
-      f === 'all' ? true : f === 'no-expiry' ? !l.expires : l.type === f);
+      filter === 'all' ? true : filter === 'no-expiry' ? !l.expires : l.type === filter);
     rows.innerHTML = list.length === 0 ? '<tr><td colspan="7" class="empty">No links match.</td></tr>' : list.map(l => `
       <tr>
         <td>${esc(l.item.split('/').pop())}<div class="sub">${esc(l.item)}</div></td>
@@ -419,12 +428,30 @@ async function pageLinks() {
         </td>
       </tr>`).join('');
   };
-  draw();
+  updateSub(scanSt.running); draw();
   document.getElementById('link-filter').addEventListener('click', e => {
     const btn = e.target.closest('button'); if (!btn) return;
     document.querySelectorAll('#link-filter button').forEach(b => b.classList.toggle('active', b === btn));
-    draw(btn.dataset.f);
+    filter = btn.dataset.f; draw();
   });
+
+  // Live refresh while a sharing scan is running: checkpoints land every 25
+  // sites, so re-fetch links whenever the data actually changed. One final
+  // refresh happens when the scan stops.
+  let wasRunning = scanSt.running;
+  let signature = links.map(l => l.id).join();
+  const poll = setInterval(async () => {
+    if (!document.getElementById('link-rows')) return clearInterval(poll); // navigated away
+    let st;
+    try { st = await api('/api/graph/scan-status'); } catch { return; }
+    if (st.running || wasRunning) {
+      links = await api('/api/links');
+      const sig = links.map(l => l.id).join();
+      updateSub(st.running);
+      if (sig !== signature) { signature = sig; draw(); } // don't redraw under the user's cursor needlessly
+    }
+    wasRunning = st.running;
+  }, 5000);
 }
 
 async function pageReviews() {
