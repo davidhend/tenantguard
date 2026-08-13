@@ -1,5 +1,7 @@
 # TenantGuard — zero-dependency Node app, so no npm install stage needed.
 FROM node:22-alpine
+# openssl CLI is only needed for the .pfx certificate import feature
+RUN apk add --no-cache openssl
 WORKDIR /app
 COPY package.json server.mjs ./
 COPY lib ./lib

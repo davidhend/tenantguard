@@ -77,8 +77,16 @@ which rejects client-secret app-only tokens — it requires a certificate:
 3. In the app registration → **API permissions → Add a permission → SharePoint
    (Office 365 SharePoint Online) → Application permissions**, add
    `Sites.FullControl.All`, then **Grant admin consent**.
-4. In TenantGuard → Settings, paste the contents of `tenantguard.crt` into
-   *Certificate (PEM)* and `tenantguard.key` into *Private key (PEM)*, then Save.
+4. In TenantGuard → Settings, either **browse to a `.pfx`/`.p12` file** (enter
+   its password and click *Import .pfx* — the server extracts the certificate
+   and key using the `openssl` CLI, included in the Docker image), or pick a
+   `.cer`/`.crt` file, or paste PEM values under *Advanced*. If you used the
+   openssl command above, bundle a .pfx with:
+   ```bash
+   openssl pkcs12 -export -out tenantguard.pfx -inkey tenantguard.key -in tenantguard.crt
+   ```
+   (Exports from the Windows certificate store work too, including legacy
+   cipher bundles.)
 
 With the certificate in place, **Settings → Fetch per-site sharing settings**
 reads every site collection's real `SharingCapability` (one fast admin-API call

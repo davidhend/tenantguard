@@ -8,6 +8,7 @@ import { getState, save, resetDemo, newId, logActivity } from './lib/store.mjs';
 import { buildSummary, computeFindings } from './lib/insights.mjs';
 import { testConnection, syncTenant, scanSharing, makeAuth, httpJson, pool } from './lib/graph.mjs';
 import { readSharingCapabilities, setSharingCapability } from './lib/spadmin.mjs';
+import { pfxToPem } from './lib/pfx.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, 'public');
@@ -477,6 +478,21 @@ route('PUT', '/api/settings', (s, _p, _q, body) => {
         ? 'Remediation actions now make real changes in the tenant via Microsoft Graph / SharePoint'
         : 'Remediation actions apply to the local model only');
   }
+  save();
+  return { ok: true };
+});
+
+// Import a .pfx/.p12 bundle (base64 from the browser) and store the extracted
+// PEM pair — same storage as manually pasted PEMs, so nothing else changes.
+route('POST', '/api/settings/pfx', async (s, _p, _q, body) => {
+  if (!body.pfxBase64) return { __status: 400, error: 'No .pfx file received' };
+  let pem;
+  try { pem = await pfxToPem(Buffer.from(body.pfxBase64, 'base64'), body.password ?? ''); }
+  catch (err) { return { __status: 400, error: err.message }; }
+  s.settings.graph.certificate = pem.certificate;
+  s.settings.graph.privateKey = pem.privateKey;
+  resetAuthCache();
+  logActivity('Certificate imported', 'Certificate and private key imported from a .pfx file');
   save();
   return { ok: true };
 });

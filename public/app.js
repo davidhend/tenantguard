@@ -621,10 +621,22 @@ async function pageSettings() {
         <div class="field"><label>Tenant ID (directory ID)</label><input type="text" id="g-tenant" value="${esc(s.graph.tenantId)}" placeholder="00000000-0000-…"></div>
         <div class="field"><label>Client ID (application ID)</label><input type="text" id="g-client" value="${esc(s.graph.clientId)}"></div>
         <div class="field"><label>Client secret</label><input type="password" id="g-secret" value="${esc(s.graph.clientSecret)}" placeholder="Secret value"></div>
-        <div class="field"><label>Certificate (PEM) — needed for per-site sharing config &amp; site-level enforcement</label>
-          <textarea id="g-cert" rows="3" placeholder="-----BEGIN CERTIFICATE-----">${esc(s.graph.certificate ?? '')}</textarea></div>
-        <div class="field"><label>Private key (PEM) — pairs with the certificate uploaded to the app registration</label>
-          <textarea id="g-key" rows="3" placeholder="-----BEGIN PRIVATE KEY-----">${esc(s.graph.privateKey ?? '')}</textarea></div>
+        <div class="field"><label>Certificate — needed for per-site sharing config &amp; site-level enforcement</label>
+          <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+            <input type="file" id="g-pfx" accept=".pfx,.p12" style="font-size:12px">
+            <input type="password" id="g-pfx-pass" placeholder=".pfx password" style="width:130px">
+            <button class="btn" id="g-pfx-import">Import .pfx</button>
+          </div>
+          <span class="muted" style="font-size:11.5px">Imports the certificate and private key together${s.graph.privateKey ? ' — a certificate is currently configured ✓' : ''}.
+            Have a separate public cert file instead? <label style="color:var(--accent);cursor:pointer">browse for a .cer/.crt<input type="file" id="g-cer" accept=".cer,.crt,.pem" style="display:none"></label></span>
+        </div>
+        <details style="margin-bottom:12px">
+          <summary class="muted" style="font-size:12px;cursor:pointer">Advanced: paste PEM values directly</summary>
+          <div class="field" style="margin-top:8px"><label>Certificate (PEM)</label>
+            <textarea id="g-cert" rows="3" placeholder="-----BEGIN CERTIFICATE-----">${esc(s.graph.certificate ?? '')}</textarea></div>
+          <div class="field"><label>Private key (PEM)</label>
+            <textarea id="g-key" rows="3" placeholder="-----BEGIN PRIVATE KEY-----">${esc(s.graph.privateKey ?? '')}</textarea></div>
+        </details>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn" id="g-save">Save</button>
           <button class="btn" id="g-test">Test connection</button>
@@ -709,6 +721,40 @@ async function pageSettings() {
       certificate: document.getElementById('g-cert').value,
       privateKey: document.getElementById('g-key').value,
     },
+  });
+
+  document.getElementById('g-pfx-import').addEventListener('click', async () => {
+    const f = document.getElementById('g-pfx').files[0];
+    if (!f) return toast('Choose a .pfx file first', true);
+    try {
+      const bytes = new Uint8Array(await f.arrayBuffer());
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      await api('/api/settings/pfx', {
+        method: 'POST',
+        body: { pfxBase64: btoa(bin), password: document.getElementById('g-pfx-pass').value },
+      });
+      toast('Certificate imported from .pfx');
+      render();
+    } catch (err) { toast(err.message, true); }
+  });
+
+  // A .cer/.crt can be PEM text or raw DER — normalize to PEM client-side.
+  document.getElementById('g-cer').addEventListener('change', async (e) => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const bytes = new Uint8Array(await f.arrayBuffer());
+    const text = new TextDecoder().decode(bytes);
+    let pem;
+    if (text.includes('-----BEGIN CERTIFICATE-----')) {
+      pem = text.trim();
+    } else {
+      let bin = '';
+      for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      pem = `-----BEGIN CERTIFICATE-----\n${btoa(bin).replace(/(.{64})/g, '$1\n').trim()}\n-----END CERTIFICATE-----`;
+    }
+    document.getElementById('g-cert').value = pem;
+    toast('Certificate loaded into the PEM field — click Save to store it');
   });
 
   document.getElementById('wb-toggle').addEventListener('click', async () => {
