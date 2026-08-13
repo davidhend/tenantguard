@@ -839,8 +839,10 @@ async function pollScan(silentIfIdle = false) {
     if (stopBtn) stopBtn.style.display = st.running ? '' : 'none';
     if (st.running) {
       const p = st.progress ?? {};
-      el.textContent = `Scanning ${p.done ?? 0}/${p.total ?? '?'} sites — ${p.links ?? 0} links found, ${p.itemsScanned ?? 0} items inspected`
-        + (p.failed ? `, ${p.failed} sites failed` : '') + (p.site ? ` — now: ${p.site}` : '');
+      el.textContent = `Scanning ${p.done ?? 0}/${p.total ?? '?'} sites (${p.inFlight ?? 1} in flight) — ${p.links ?? 0} links found, ${p.itemsScanned ?? 0} items inspected`
+        + (p.failed ? `, ${p.failed} sites failed` : '')
+        + (p.throttledFor ? ` — ⏳ throttled by Microsoft, backing off ~${p.throttledFor}s` : '')
+        + (p.site ? ` — now: ${p.site}` : '');
       return true;
     }
     clearInterval(scanTimer);
