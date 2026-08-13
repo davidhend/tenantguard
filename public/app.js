@@ -617,7 +617,10 @@ async function pageSettings() {
           <label style="display:flex;gap:6px;align-items:center;font-size:12.5px;margin-bottom:10px">
             <input type="checkbox" id="scan-fresh"> Rescan already-scanned sites (start over)
           </label>
-          <button class="btn primary" id="scan-start">Scan sharing links</button>
+          <div style="display:flex;gap:8px">
+            <button class="btn primary" id="scan-start">Scan sharing links</button>
+            <button class="btn danger" id="scan-stop" style="display:none">Stop scan</button>
+          </div>
           <p class="muted" id="scan-progress" style="font-size:12px;margin-bottom:0"></p>
         </div>
         <div class="card mt">
@@ -668,6 +671,12 @@ async function pageSettings() {
       pollScan();
     } catch (err) { toast(err.message, true); }
   });
+  document.getElementById('scan-stop').addEventListener('click', async () => {
+    try {
+      await api('/api/graph/scan-stop', { method: 'POST' });
+      toast('Stopping — in-flight sites will wrap up, progress is kept');
+    } catch (err) { toast(err.message, true); }
+  });
   pollScan(true); // resume progress display if a scan is already running
 
   document.getElementById('t-save').addEventListener('click', async () => {
@@ -688,6 +697,8 @@ async function pollScan(silentIfIdle = false) {
     if (!el) { clearInterval(scanTimer); return false; } // navigated away
     let st;
     try { st = await api('/api/graph/scan-status'); } catch { return false; }
+    const stopBtn = document.getElementById('scan-stop');
+    if (stopBtn) stopBtn.style.display = st.running ? '' : 'none';
     if (st.running) {
       const p = st.progress ?? {};
       el.textContent = `Scanning ${p.done ?? 0}/${p.total ?? '?'} sites — ${p.links ?? 0} links found, ${p.itemsScanned ?? 0} items inspected`

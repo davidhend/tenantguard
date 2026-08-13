@@ -385,9 +385,15 @@ route('POST', '/api/graph/sync', async (s) => {
 
 // Sharing-link scan runs in the background (it can take many minutes on
 // large tenants); the frontend polls scan-status until it finishes.
-let scan = { running: false, progress: null, error: null, finishedAt: null, result: null };
+let scan = { running: false, progress: null, error: null, finishedAt: null, result: null, stopRequested: false };
 
 route('GET', '/api/graph/scan-status', () => scan);
+
+route('POST', '/api/graph/scan-stop', () => {
+  if (!scan.running) return { __status: 400, error: 'No scan is running' };
+  scan.stopRequested = true;
+  return { ok: true };
+});
 
 route('POST', '/api/graph/scan-sharing', (s, _p, _q, body) => {
   if (scan.running) return { __status: 409, error: 'A scan is already running' };
@@ -411,7 +417,7 @@ route('POST', '/api/graph/scan-sharing', (s, _p, _q, body) => {
   scan = {
     running: true,
     progress: { done: 0, total: Math.min(maxSites, candidates.length), links: 0, site: '', itemsScanned: 0 },
-    error: null, finishedAt: null, result: null,
+    error: null, finishedAt: null, result: null, stopRequested: false,
   };
   const onCheckpoint = (batch) => {
     const ids = new Set(batch.map(b => b.siteId));
@@ -419,7 +425,7 @@ route('POST', '/api/graph/scan-sharing', (s, _p, _q, body) => {
     s.lastScan.scannedSiteIds.push(...batch.map(b => b.siteId));
     save();
   };
-  scanSharing(s.settings.graph, candidates, { maxSites, onCheckpoint }, p => {
+  scanSharing(s.settings.graph, candidates, { maxSites, onCheckpoint, shouldStop: () => scan.stopRequested }, p => {
     if (p.phase === 'scan' || p.phase === 'done') scan.progress = p;
     else if (p.phase === 'site-error') console.error('[scan]', p.site, '—', p.error);
   })
@@ -430,7 +436,8 @@ route('POST', '/api/graph/scan-sharing', (s, _p, _q, body) => {
         r.sitesFailed ? `${r.sitesFailed} site(s) failed and will be retried next run (first error: ${r.errors[0] ?? 'see server log'})` : '',
         r.truncatedDrives ? `${r.truncatedDrives} very large librar${r.truncatedDrives === 1 ? 'y' : 'ies'} truncated` : '',
       ].filter(Boolean).join('; ');
-      logActivity(r.sitesFailed ? 'Sharing scan chunk completed WITH ERRORS' : 'Sharing scan chunk completed',
+      logActivity(r.stopped ? 'Sharing scan stopped by user'
+        : r.sitesFailed ? 'Sharing scan chunk completed WITH ERRORS' : 'Sharing scan chunk completed',
         `${r.links.length} link(s) found on ${r.sitesScanned - r.sitesFailed}/${r.sitesScanned} site(s), ${r.itemsScanned} items inspected; ` +
         `${s.links.filter(l => !l.revoked).length} links known in total, ${remaining} site(s) left to scan` +
         (caveats ? ` (${caveats})` : ''),
