@@ -6,7 +6,8 @@ import { join, extname, normalize, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getState, save, resetDemo, newId, logActivity } from './lib/store.mjs';
 import { buildSummary, computeFindings } from './lib/insights.mjs';
-import { testConnection, syncTenant, scanSharing } from './lib/graph.mjs';
+import { testConnection, syncTenant, scanSharing, makeAuth, httpJson, pool } from './lib/graph.mjs';
+import { readSharingCapabilities, setSharingCapability } from './lib/spadmin.mjs';
 
 const ROOT = dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = join(ROOT, 'public');
@@ -47,6 +48,38 @@ function readBody(req) {
 
 const userName = (s, id) => s.users.find(u => u.id === id)?.name ?? id;
 const siteName = (s, id) => s.sites.find(x => x.id === id)?.name ?? id;
+
+// ---------- write-back (enforcement) ----------
+
+// Remediation hits the real tenant only when BOTH are true: live data is
+// loaded AND the user explicitly enabled write-back in Settings.
+const liveWrites = (s) => !s.settings.demoMode && !!s.settings.writeBack;
+
+let cachedGraphAuth = null;
+const graphAuth = (s) => (cachedGraphAuth ??= makeAuth(s.settings.graph));
+const resetAuthCache = () => { cachedGraphAuth = null; };
+
+const liveTag = (s) => (liveWrites(s) ? ' (applied to tenant)' : '');
+
+// Scanned link ids are "driveId:itemId:permissionId" — demo/seed links have
+// no Graph identity and cannot be written back.
+function linkGraphPath(link) {
+  const parts = link.id.split(':');
+  if (parts.length < 3) return null;
+  return `/drives/${parts[0]}/items/${parts[1]}/permissions/${parts.slice(2).join(':')}`;
+}
+
+// Remove a user from every group we know they're in. Returns group names
+// that failed so callers can report partial success honestly.
+async function graphRemoveFromGroups(s, userId) {
+  const failures = [];
+  const inGroups = s.groups.filter(g => g.members.includes(userId) || g.guests.includes(userId));
+  await pool(inGroups, 4, async (g) => {
+    try { await httpJson(graphAuth(s), `/groups/${g.id}/members/${userId}/$ref`, { method: 'DELETE' }); }
+    catch (err) { failures.push(`${g.name}: ${err.message.slice(0, 120)}`); }
+  });
+  return failures;
+}
 
 // Attach display info the frontend needs, without leaking the whole store.
 function decorateReview(s, r) {
@@ -104,11 +137,15 @@ route('GET', '/api/sites/:id', (s, p) => {
   };
 });
 
-route('POST', '/api/sites/:id/disable-external', (s, p) => {
+route('POST', '/api/sites/:id/disable-external', async (s, p) => {
   const site = s.sites.find(x => x.id === p.id);
   if (!site) return { __status: 404, error: 'Site not found' };
+  if (liveWrites(s)) {
+    try { await setSharingCapability(s.settings.graph, s.sites, site.id, 'internal-only'); }
+    catch (err) { return { __status: 502, error: `Tenant update failed: ${err.message}` }; }
+  }
   site.externalSharing = 'internal-only';
-  logActivity('External sharing disabled', `${site.name} set to internal only`);
+  logActivity('External sharing disabled' + liveTag(s), `${site.name} set to internal only`);
   save();
   return { ok: true };
 });
@@ -128,9 +165,16 @@ route('POST', '/api/groups/:id/owners', async (s, p, _q, body) => {
   if (!g) return { __status: 404, error: 'Group not found' };
   const user = s.users.find(u => u.id === body.userId && u.type === 'member');
   if (!user) return { __status: 400, error: 'Pick an internal user to promote to owner' };
+  if (liveWrites(s)) {
+    const ref = { '@odata.id': `https://graph.microsoft.com/v1.0/directoryObjects/${user.id}` };
+    try { await httpJson(graphAuth(s), `/groups/${g.id}/owners/$ref`, { method: 'POST', body: ref }); }
+    catch (err) { return { __status: 502, error: `Tenant update failed: ${err.message}` }; }
+    // Owners should usually be members too; "already a member" errors are fine.
+    await httpJson(graphAuth(s), `/groups/${g.id}/members/$ref`, { method: 'POST', body: ref }).catch(() => {});
+  }
   if (!g.owners.includes(user.id)) g.owners.push(user.id);
   if (!g.members.includes(user.id)) g.members.push(user.id);
-  logActivity('Owner assigned', `${user.name} is now an owner of ${g.name}`);
+  logActivity('Owner assigned' + liveTag(s), `${user.name} is now an owner of ${g.name}`);
   save();
   return { ok: true };
 });
@@ -155,9 +199,18 @@ route('GET', '/api/users', (s, _p, q) => {
     });
 });
 
-route('POST', '/api/users/:id/remove', (s, p) => {
+route('POST', '/api/users/:id/remove', async (s, p) => {
   const u = s.users.find(x => x.id === p.id);
   if (!u) return { __status: 404, error: 'User not found' };
+  let failNote = '';
+  if (liveWrites(s)) {
+    // Disable sign-in first (blocks all access immediately, reversible),
+    // then strip group memberships.
+    try { await httpJson(graphAuth(s), `/users/${u.id}`, { method: 'PATCH', body: { accountEnabled: false } }); }
+    catch (err) { return { __status: 502, error: `Could not disable the account: ${err.message}` }; }
+    const failures = await graphRemoveFromGroups(s, u.id);
+    if (failures.length) failNote = `; ${failures.length} group removal(s) failed (${failures[0]})`;
+  }
   u.enabled = false;
   // Strip their access everywhere
   s.permissions = s.permissions.filter(pm => pm.principalId !== u.id);
@@ -166,9 +219,10 @@ route('POST', '/api/users/:id/remove', (s, p) => {
     g.members = g.members.filter(id => id !== u.id);
     g.guests = g.guests.filter(id => id !== u.id);
   }
-  logActivity(u.type === 'guest' ? 'Guest removed' : 'User access removed', `${u.name} (${u.email}) removed from all sites and groups`);
+  logActivity((u.type === 'guest' ? 'Guest removed' : 'User access removed') + liveTag(s),
+    `${u.name} (${u.email}) removed from all sites and groups${failNote}`);
   save();
-  return { ok: true };
+  return { ok: true, warning: failNote || undefined };
 });
 
 route('GET', '/api/links', (s, _p, q) => {
@@ -183,21 +237,34 @@ route('GET', '/api/links', (s, _p, q) => {
     }));
 });
 
-route('POST', '/api/links/:id/revoke', (s, p) => {
+route('POST', '/api/links/:id/revoke', async (s, p) => {
   const l = s.links.find(x => x.id === p.id);
   if (!l) return { __status: 404, error: 'Link not found' };
+  if (liveWrites(s)) {
+    const path = linkGraphPath(l);
+    if (!path) return { __status: 400, error: 'This link has no Graph identity — re-run the sharing scan first' };
+    try { await httpJson(graphAuth(s), path, { method: 'DELETE' }); }
+    catch (err) { return { __status: 502, error: `Tenant revoke failed: ${err.message}` }; }
+  }
   l.revoked = true;
-  logActivity('Sharing link revoked', `${l.type} link on ${l.item} (${siteName(s, l.siteId)})`);
+  logActivity('Sharing link revoked' + liveTag(s), `${l.type} link on ${l.item} (${siteName(s, l.siteId)})`);
   save();
   return { ok: true };
 });
 
-route('POST', '/api/links/:id/expiry', (s, p, _q, body) => {
+route('POST', '/api/links/:id/expiry', async (s, p, _q, body) => {
   const l = s.links.find(x => x.id === p.id);
   if (!l) return { __status: 404, error: 'Link not found' };
   const days = Number(body.days) || 30;
-  l.expires = new Date(Date.now() + days * 86400000).toISOString();
-  logActivity('Link expiration set', `${l.item} now expires in ${days} days`);
+  const expires = new Date(Date.now() + days * 86400000).toISOString();
+  if (liveWrites(s)) {
+    const path = linkGraphPath(l);
+    if (!path) return { __status: 400, error: 'This link has no Graph identity — re-run the sharing scan first' };
+    try { await httpJson(graphAuth(s), path, { method: 'PATCH', body: { expirationDateTime: expires } }); }
+    catch (err) { return { __status: 502, error: `Tenant update failed: ${err.message}` }; }
+  }
+  l.expires = expires;
+  logActivity('Link expiration set' + liveTag(s), `${l.item} now expires in ${days} days`);
   save();
   return { ok: true };
 });
@@ -253,17 +320,27 @@ route('POST', '/api/reviews/:id/items/:itemId', (s, p, _q, body) => {
   return decorateReview(s, r);
 });
 
-route('POST', '/api/reviews/:id/complete', (s, p) => {
+route('POST', '/api/reviews/:id/complete', async (s, p) => {
   const r = s.reviews.find(x => x.id === p.id);
   if (!r) return { __status: 404, error: 'Review not found' };
   const undecided = r.items.filter(i => !i.decision).length;
   if (undecided > 0) return { __status: 400, error: `${undecided} item(s) still need a decision` };
   // Apply revocations
   let revoked = 0;
+  const failures = [];
   for (const item of r.items.filter(i => i.decision === 'revoked')) {
-    s.permissions = s.permissions.filter(pm => !(pm.principalId === item.principalId && pm.siteId === item.siteId));
     const site = s.sites.find(x => x.id === item.siteId);
     const grp = s.groups.find(g => g.siteId === item.siteId || g.id === site?.groupId);
+    if (liveWrites(s) && grp) {
+      // If the tenant removal fails, keep the local grant too — the model
+      // must not claim access was revoked while it still exists.
+      try { await httpJson(graphAuth(s), `/groups/${grp.id}/members/${item.principalId}/$ref`, { method: 'DELETE' }); }
+      catch (err) {
+        failures.push(`${userName(s, item.principalId)} on ${siteName(s, item.siteId)}: ${err.message.slice(0, 120)}`);
+        continue;
+      }
+    }
+    s.permissions = s.permissions.filter(pm => !(pm.principalId === item.principalId && pm.siteId === item.siteId));
     if (grp) {
       grp.guests = grp.guests.filter(id => id !== item.principalId);
       grp.members = grp.members.filter(id => id !== item.principalId);
@@ -272,9 +349,13 @@ route('POST', '/api/reviews/:id/complete', (s, p) => {
   }
   r.status = 'completed';
   r.completedAt = new Date().toISOString();
-  logActivity('Access review completed', `"${r.name}" — ${revoked} access grant(s) revoked, ${r.items.length - revoked} approved`);
+  logActivity('Access review completed' + liveTag(s),
+    `"${r.name}" — ${revoked} access grant(s) revoked, ${r.items.length - revoked - failures.length} approved` +
+    (failures.length ? `; ${failures.length} revocation(s) FAILED in the tenant (${failures[0]})` : ''));
   save();
-  return decorateReview(s, r);
+  const out = decorateReview(s, r);
+  if (failures.length) out.warning = `${failures.length} revocation(s) failed in the tenant and were kept locally: ${failures[0]}`;
+  return out;
 });
 
 // Policies whose violations the enforce endpoint can remediate automatically.
@@ -299,43 +380,83 @@ route('POST', '/api/policies/:id/toggle', (s, p) => {
   return { ok: true, enabled: pol.enabled };
 });
 
-// One-click enforcement: applies the standard fix for every violation of a policy.
-route('POST', '/api/policies/:id/enforce', (s, p) => {
+// One-click enforcement: applies the standard fix for every violation of a
+// policy. With write-back on, each fix hits the tenant first and the local
+// model only updates on success — failures are counted and reported.
+route('POST', '/api/policies/:id/enforce', async (s, p) => {
   const pol = s.policies.find(x => x.id === p.id);
   if (!pol) return { __status: 404, error: 'Policy not found' };
   const findings = computeFindings(s).filter(f => f.policyId === pol.id && f.fix);
+  const live = liveWrites(s);
   let fixed = 0;
-  for (const f of findings) {
-    if (f.kind === 'link') {
-      const l = s.links.find(x => x.id === f.targetId);
-      if (!l) continue;
-      if (pol.id === 'pol-anyone-links') { l.revoked = true; fixed++; }
-      else if (pol.id === 'pol-link-expiry') { l.expires = new Date(Date.now() + 30 * 86400000).toISOString(); fixed++; }
-    } else if (f.kind === 'guest' && pol.id === 'pol-guest-expiry') {
-      const u = s.users.find(x => x.id === f.targetId);
-      if (!u) continue;
-      u.enabled = false;
-      s.permissions = s.permissions.filter(pm => pm.principalId !== u.id);
-      for (const g of s.groups) {
-        g.members = g.members.filter(id => id !== u.id);
-        g.guests = g.guests.filter(id => id !== u.id);
+  const failures = [];
+  const fail = (label, err) => { if (failures.length < 8) failures.push(`${label}: ${err.message.slice(0, 120)}`); else failures.length++; };
+
+  await pool(findings, live ? 4 : findings.length || 1, async (f) => {
+    try {
+      if (f.kind === 'link') {
+        const l = s.links.find(x => x.id === f.targetId);
+        if (!l) return;
+        if (pol.id === 'pol-anyone-links') {
+          if (live) {
+            const path = linkGraphPath(l);
+            if (!path) throw new Error('link has no Graph identity');
+            await httpJson(graphAuth(s), path, { method: 'DELETE' });
+          }
+          l.revoked = true; fixed++;
+        } else if (pol.id === 'pol-link-expiry') {
+          const expires = new Date(Date.now() + 30 * 86400000).toISOString();
+          if (live) {
+            const path = linkGraphPath(l);
+            if (!path) throw new Error('link has no Graph identity');
+            await httpJson(graphAuth(s), path, { method: 'PATCH', body: { expirationDateTime: expires } });
+          }
+          l.expires = expires; fixed++;
+        }
+      } else if (f.kind === 'guest' && pol.id === 'pol-guest-expiry') {
+        const u = s.users.find(x => x.id === f.targetId);
+        if (!u) return;
+        if (live) {
+          await httpJson(graphAuth(s), `/users/${u.id}`, { method: 'PATCH', body: { accountEnabled: false } });
+          await graphRemoveFromGroups(s, u.id);
+        }
+        u.enabled = false;
+        s.permissions = s.permissions.filter(pm => pm.principalId !== u.id);
+        for (const g of s.groups) {
+          g.members = g.members.filter(id => id !== u.id);
+          g.guests = g.guests.filter(id => id !== u.id);
+        }
+        fixed++;
+      } else if (f.kind === 'site' && pol.id === 'pol-confidential-external') {
+        const site = s.sites.find(x => x.id === f.targetId);
+        if (!site) return;
+        if (live) await setSharingCapability(s.settings.graph, s.sites, site.id, 'internal-only');
+        site.externalSharing = 'internal-only'; fixed++;
       }
-      fixed++;
-    } else if (f.kind === 'site' && pol.id === 'pol-confidential-external') {
-      const site = s.sites.find(x => x.id === f.targetId);
-      if (site) { site.externalSharing = 'internal-only'; fixed++; }
+    } catch (err) {
+      fail(f.title, err);
     }
-  }
-  logActivity('Policy enforced', `"${pol.name}" — ${fixed} violation(s) auto-remediated`);
+  });
+
+  logActivity('Policy enforced' + liveTag(s),
+    `"${pol.name}" — ${fixed} violation(s) remediated` +
+    (failures.length ? `; ${failures.length} FAILED (${failures[0]})` : ''));
   save();
-  return { ok: true, fixed };
+  return { ok: true, fixed, failed: failures.length, errors: failures };
 });
 
 route('GET', '/api/activity', (s) => s.activity);
 
+const MASK = '••••••••';
+
 route('GET', '/api/settings', (s) => ({
   ...s.settings,
-  graph: { ...s.settings.graph, clientSecret: s.settings.graph.clientSecret ? '••••••••' : '' },
+  writeBack: !!s.settings.writeBack,
+  graph: {
+    ...s.settings.graph,
+    clientSecret: s.settings.graph.clientSecret ? MASK : '',
+    privateKey: s.settings.graph.privateKey ? MASK : '',
+  },
 }));
 
 route('PUT', '/api/settings', (s, _p, _q, body) => {
@@ -344,10 +465,53 @@ route('PUT', '/api/settings', (s, _p, _q, body) => {
     const g = body.graph;
     s.settings.graph.tenantId = g.tenantId ?? s.settings.graph.tenantId;
     s.settings.graph.clientId = g.clientId ?? s.settings.graph.clientId;
-    if (g.clientSecret && g.clientSecret !== '••••••••') s.settings.graph.clientSecret = g.clientSecret;
+    if (g.clientSecret !== undefined && g.clientSecret !== MASK) s.settings.graph.clientSecret = g.clientSecret;
+    if (g.certificate !== undefined) s.settings.graph.certificate = g.certificate.trim();
+    if (g.privateKey !== undefined && g.privateKey !== MASK) s.settings.graph.privateKey = g.privateKey.trim();
+    resetAuthCache();
+  }
+  if (typeof body.writeBack === 'boolean' && body.writeBack !== !!s.settings.writeBack) {
+    s.settings.writeBack = body.writeBack;
+    logActivity(body.writeBack ? 'Enforcement mode ENABLED' : 'Enforcement mode disabled',
+      body.writeBack
+        ? 'Remediation actions now make real changes in the tenant via Microsoft Graph / SharePoint'
+        : 'Remediation actions apply to the local model only');
   }
   save();
   return { ok: true };
+});
+
+// ---------- per-site sharing configuration (SharePoint admin API) ----------
+
+let spJob = { running: false, progress: null, error: null, finishedAt: null, result: null };
+
+route('GET', '/api/spadmin/status', () => spJob);
+
+route('POST', '/api/spadmin/sharing-sync', (s) => {
+  if (spJob.running) return { __status: 409, error: 'A sharing-settings sync is already running' };
+  if (s.settings.demoMode) return { __status: 400, error: 'Sync a real tenant first' };
+  if (!s.sites.length) return { __status: 400, error: 'No sites — run "Sync tenant now" first' };
+  if (!s.settings.graph.certificate || !s.settings.graph.privateKey) {
+    return { __status: 400, error: 'Certificate credentials are required for the SharePoint admin API — add them in Settings' };
+  }
+  spJob = { running: true, progress: { done: 0, total: 0, failed: 0 }, error: null, finishedAt: null, result: null };
+  readSharingCapabilities(s.settings.graph, s.sites, p => { spJob.progress = p; })
+    .then(r => {
+      let updated = 0;
+      for (const site of s.sites) {
+        const cap = r.capBySite[site.id];
+        if (cap) { site.externalSharing = cap; updated++; }
+      }
+      spJob.result = { updated, total: r.total, failed: r.failed, errors: r.errors };
+      logActivity(r.failed ? 'Per-site sharing settings synced WITH ERRORS' : 'Per-site sharing settings synced',
+        `${updated} site(s) updated from the SharePoint admin API` +
+        (r.failed ? `; ${r.failed} of ${r.total} lookups failed (first: ${r.errors[0] ?? 'see log'})` : ''),
+        'System');
+      save();
+    })
+    .catch(err => { spJob.error = err.message; })
+    .finally(() => { spJob.running = false; spJob.finishedAt = new Date().toISOString(); });
+  return { ok: true, started: true };
 });
 
 route('POST', '/api/graph/test', async (s) => {

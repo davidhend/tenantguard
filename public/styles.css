@@ -178,11 +178,12 @@ th.num { text-align: right; }
 .btn.danger:hover { background: rgba(208, 59, 59, 0.08); }
 .btn.small { padding: 3px 9px; font-size: 12px; }
 .btn:disabled { opacity: 0.5; cursor: default; }
-input[type="text"], input[type="password"], input[type="number"], select {
+input[type="text"], input[type="password"], input[type="number"], select, textarea {
   padding: 7px 10px; border-radius: 7px; border: 1px solid var(--grid);
   background: var(--surface); color: var(--ink); font: inherit; font-size: 13px;
 }
-input:focus, select:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+textarea { font-family: ui-monospace, monospace; font-size: 11.5px; resize: vertical; width: 100%; }
+input:focus, select:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
 .search { min-width: 240px; }
 .field { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
 .field label { font-size: 12px; font-weight: 600; color: var(--ink-2); }

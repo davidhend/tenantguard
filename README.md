@@ -60,10 +60,54 @@ TenantGuard talks to Microsoft Graph directly (plain REST, no SDK) using an
 
 Sync is **read-only** against your tenant: it pulls users, groups (with
 owners/members/guests), and **all** sites (via `/sites/getAllSites`), and derives
-per-site "who has access" from group ownership/membership. Remediation buttons
-update the local model — wiring them to Graph write calls (remove guest, revoke
-link) is straightforward in `lib/graph.mjs` if you want real enforcement, but
-read-only is the safe default.
+per-site "who has access" from group ownership/membership. By default remediation
+buttons update the local model only — real enforcement is opt-in (see below).
+
+## Certificate credentials (per-site sharing config + site enforcement)
+
+Per-site external-sharing **configuration** lives in the SharePoint Admin API,
+which rejects client-secret app-only tokens — it requires a certificate:
+
+1. Generate a self-signed certificate (1 command):
+   ```bash
+   openssl req -x509 -newkey rsa:2048 -keyout tenantguard.key -out tenantguard.crt -days 365 -nodes -subj "/CN=TenantGuard"
+   ```
+2. In the app registration → **Certificates & secrets → Certificates → Upload
+   certificate**, upload `tenantguard.crt`.
+3. In the app registration → **API permissions → Add a permission → SharePoint
+   (Office 365 SharePoint Online) → Application permissions**, add
+   `Sites.FullControl.All`, then **Grant admin consent**.
+4. In TenantGuard → Settings, paste the contents of `tenantguard.crt` into
+   *Certificate (PEM)* and `tenantguard.key` into *Private key (PEM)*, then Save.
+
+With the certificate in place, **Settings → Fetch per-site sharing settings**
+reads every site collection's real `SharingCapability` (one fast admin-API call
+per collection) and replaces the evidence-based values on the Sites page with
+actual configuration. When both a secret and a certificate are present, the
+certificate is preferred for all token requests (Graph accepts it too).
+
+## Enforcement (write-back)
+
+Off by default. When you flip **Settings → Enforcement** on (real tenant only),
+remediation buttons stop being dashboard-only and make real changes:
+
+| Action | What happens in the tenant |
+|---|---|
+| Revoke sharing link | `DELETE` on the item's permission |
+| Set link expiration | `PATCH` with `expirationDateTime` |
+| Remove guest | Account sign-in disabled + removed from all known groups |
+| Add owner | Added to group owners (and members) |
+| Access review "Revoke" | Removed from the site's group on completion |
+| Disable external sharing | Site collection set to internal-only (needs the certificate) |
+
+Additional **application permissions** required for write-back (admin-consented):
+`Sites.ReadWrite.All` (links), `User.ReadWrite.All` (guest disable),
+`Group.ReadWrite.All` and `GroupMember.ReadWrite.All` (owners/members), and the
+SharePoint `Sites.FullControl.All` above for site sharing changes.
+
+Failure semantics: the tenant call happens first, and the local model updates
+only on success — bulk operations report exactly how many fixes succeeded and
+failed, and failures stay visible as findings.
 
 ### Sharing links on a real tenant
 

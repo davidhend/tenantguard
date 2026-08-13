@@ -119,7 +119,10 @@ async function pageDashboard() {
       <div><h1>Dashboard</h1>
         <div class="sub">${esc(s.tenantName)} · ${s.counts.sites} sites · ${s.counts.teams} teams · ${s.counts.users} users · ${s.counts.guests} guests${s.lastSync ? ` · synced ${ago(s.lastSync)}` : ''}</div>
       </div>
-      ${s.demoMode ? '<span class="badge badge-demo">Demo data — connect a tenant in Settings</span>' : ''}
+      <div class="head-actions">
+        ${s.writeBack && !s.demoMode ? '<span class="badge badge-danger" title="Remediation actions make real changes in the tenant">Enforcement ON</span>' : ''}
+        ${s.demoMode ? '<span class="badge badge-demo">Demo data — connect a tenant in Settings</span>' : ''}
+      </div>
     </div>
 
     <div class="grid hero-row">
@@ -618,6 +621,10 @@ async function pageSettings() {
         <div class="field"><label>Tenant ID (directory ID)</label><input type="text" id="g-tenant" value="${esc(s.graph.tenantId)}" placeholder="00000000-0000-…"></div>
         <div class="field"><label>Client ID (application ID)</label><input type="text" id="g-client" value="${esc(s.graph.clientId)}"></div>
         <div class="field"><label>Client secret</label><input type="password" id="g-secret" value="${esc(s.graph.clientSecret)}" placeholder="Secret value"></div>
+        <div class="field"><label>Certificate (PEM) — needed for per-site sharing config &amp; site-level enforcement</label>
+          <textarea id="g-cert" rows="3" placeholder="-----BEGIN CERTIFICATE-----">${esc(s.graph.certificate ?? '')}</textarea></div>
+        <div class="field"><label>Private key (PEM) — pairs with the certificate uploaded to the app registration</label>
+          <textarea id="g-key" rows="3" placeholder="-----BEGIN PRIVATE KEY-----">${esc(s.graph.privateKey ?? '')}</textarea></div>
         <div style="display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn" id="g-save">Save</button>
           <button class="btn" id="g-test">Test connection</button>
@@ -633,6 +640,31 @@ async function pageSettings() {
       </div>
       <div>
         <div class="card">
+          <h2>Enforcement (write-back)</h2>
+          <p class="muted" style="font-size:12.5px;margin-top:0">
+            When <strong>on</strong> (and connected to a real tenant), remediation
+            buttons make real changes: revoking links, disabling guest accounts,
+            removing group members, adding owners, and setting sites to
+            internal-only. Requires write permissions on the app registration —
+            see the README. When off, actions update this dashboard only.
+          </p>
+          <div style="display:flex;gap:10px;align-items:center">
+            <button class="btn ${s.writeBack ? 'danger' : 'primary'}" id="wb-toggle">${s.writeBack ? 'Turn enforcement off' : 'Turn enforcement on'}</button>
+            ${s.writeBack ? '<span class="badge badge-danger">Enforcement ON</span>' : '<span class="badge badge-neutral">Off — dashboard only</span>'}
+          </div>
+        </div>
+        <div class="card mt">
+          <h2>Per-site sharing configuration</h2>
+          <p class="muted" style="font-size:12.5px;margin-top:0">
+            Reads each site's real external-sharing setting from the SharePoint
+            admin API (one call per site collection — fast). Requires the
+            certificate credentials and the SharePoint
+            <code class="inline">Sites.FullControl.All</code> application permission.
+          </p>
+          <button class="btn primary" id="sp-sync">Fetch per-site sharing settings</button>
+          <p class="muted" id="sp-progress" style="font-size:12px;margin-bottom:0"></p>
+        </div>
+        <div class="card mt">
           <h2>Risk thresholds</h2>
           <div class="field"><label>Guest is stale after (days without sign-in)</label>
             <input type="number" id="t-guest" value="${s.thresholds.staleGuestDays}" min="7"></div>
@@ -674,8 +706,30 @@ async function pageSettings() {
       tenantId: document.getElementById('g-tenant').value.trim(),
       clientId: document.getElementById('g-client').value.trim(),
       clientSecret: document.getElementById('g-secret').value,
+      certificate: document.getElementById('g-cert').value,
+      privateKey: document.getElementById('g-key').value,
     },
   });
+
+  document.getElementById('wb-toggle').addEventListener('click', async () => {
+    const turningOn = !s.writeBack;
+    if (turningOn && !confirm('Turn on enforcement? Remediation buttons will make REAL changes in your tenant (revoke links, disable guests, change site sharing).')) return;
+    try {
+      await api('/api/settings', { method: 'PUT', body: { writeBack: turningOn } });
+      toast(turningOn ? 'Enforcement is ON — actions now change the tenant' : 'Enforcement off — dashboard-only mode');
+      render();
+    } catch (err) { toast(err.message, true); }
+  });
+
+  document.getElementById('sp-sync').addEventListener('click', async () => {
+    try {
+      await api('/api/settings', { method: 'PUT', body: graphBody() });
+      await api('/api/spadmin/sharing-sync', { method: 'POST' });
+      toast('Fetching per-site sharing settings…');
+      pollSp();
+    } catch (err) { toast(err.message, true); }
+  });
+  pollSp(true);
   document.getElementById('g-save').addEventListener('click', async () => {
     await api('/api/settings', { method: 'PUT', body: graphBody() });
     toast('Connection settings saved');
@@ -756,6 +810,32 @@ async function pollScan(silentIfIdle = false) {
     return false;
   };
   if (await tick()) scanTimer = setInterval(tick, 2000);
+}
+
+// Poll the per-site sharing-settings sync (SharePoint admin API).
+let spTimer = null;
+async function pollSp(silentIfIdle = false) {
+  clearInterval(spTimer);
+  const tick = async () => {
+    const el = document.getElementById('sp-progress');
+    if (!el) { clearInterval(spTimer); return false; }
+    let st;
+    try { st = await api('/api/spadmin/status'); } catch { return false; }
+    if (st.running) {
+      const p = st.progress ?? {};
+      el.textContent = `Reading site collections: ${p.done ?? 0}/${p.total || '…'}${p.failed ? `, ${p.failed} failed` : ''}`;
+      return true;
+    }
+    clearInterval(spTimer);
+    if (st.error) { el.textContent = `Failed: ${st.error}`; if (!silentIfIdle) toast(st.error, true); }
+    else if (st.result) {
+      const r = st.result;
+      el.textContent = `Last sync: ${r.updated} sites updated from ${r.total} collections${r.failed ? ` — ⚠ ${r.failed} lookups failed (${r.errors?.[0] ?? ''})` : ''}.`;
+      if (!silentIfIdle) toast(`Sharing settings updated on ${r.updated} sites`, !!r.failed);
+    } else if (!silentIfIdle) el.textContent = '';
+    return false;
+  };
+  if (await tick()) spTimer = setInterval(tick, 2000);
 }
 
 // ---------- router ----------
