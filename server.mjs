@@ -372,6 +372,7 @@ route('POST', '/api/graph/sync', async (s) => {
     s.links = data.links;
     s.permissions = data.permissions;
     if (data.tenantName) s.settings.tenantName = data.tenantName;
+    s.settings.tenantSharing = data.tenantSharing ?? null;
     s.settings.demoMode = false;
     s.settings.graph.connected = true;
     s.settings.graph.lastSync = new Date().toISOString();
@@ -423,6 +424,11 @@ route('POST', '/api/graph/scan-sharing', (s, _p, _q, body) => {
     const ids = new Set(batch.map(b => b.siteId));
     s.links = s.links.filter(l => !ids.has(l.siteId)).concat(batch.flatMap(b => b.links));
     s.lastScan.scannedSiteIds.push(...batch.map(b => b.siteId));
+    // An "Anyone" link is proof the site permits anonymous sharing.
+    const anyoneSites = new Set(batch.flatMap(b => b.links.filter(l => l.type === 'anyone').map(l => l.siteId)));
+    for (const site of s.sites) {
+      if (anyoneSites.has(site.id)) site.externalSharing = 'anyone';
+    }
     save();
   };
   scanSharing(s.settings.graph, candidates, { maxSites, onCheckpoint, shouldStop: () => scan.stopRequested }, p => {

@@ -53,6 +53,7 @@ TenantGuard talks to Microsoft Graph directly (plain REST, no SDK) using an
    - `GroupMember.Read.All`
    - `Sites.Read.All`
    - `AuditLog.Read.All` *(optional — enables last-sign-in dates for stale-guest detection)*
+   - `SharePointTenantSettings.Read.All` *(optional — shows the tenant-wide external-sharing policy)*
 3. Click **Grant admin consent**.
 4. **Certificates & secrets → New client secret** — copy the secret *value*.
 5. In TenantGuard → **Settings**, paste the **Tenant ID**, **Client ID** (both on the app's Overview page) and the secret, then **Test connection** and **Sync tenant now**.

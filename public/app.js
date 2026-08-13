@@ -48,11 +48,20 @@ function sev(level) {
 }
 
 function sharingBadge(mode) {
-  if (mode === 'anyone') return '<span class="badge badge-danger">Anyone links allowed</span>';
-  if (mode === 'existing-guests') return '<span class="badge badge-warn">Existing guests</span>';
+  if (mode === 'anyone') return '<span class="badge badge-danger" title="An active &quot;Anyone&quot; link proves anonymous sharing works on this site">Anyone links found</span>';
+  if (mode === 'existing-guests') return '<span class="badge badge-warn" title="Guests currently have access to this site">Guests have access</span>';
+  if (mode === 'new-and-existing-guests') return '<span class="badge badge-warn">New &amp; existing guests</span>';
   if (mode === 'internal-only') return '<span class="badge badge-good">Internal only</span>';
+  if (mode === 'none-observed' || mode === 'unknown') return '<span class="badge badge-neutral" title="No guests or anonymous links observed. Per-site sharing settings are not exposed by the Graph API — this reflects observed evidence, not configuration">None observed</span>';
   return `<span class="badge badge-neutral">${esc(mode)}</span>`;
 }
+
+const TENANT_SHARING_LABEL = {
+  disabled: 'Disabled — internal only',
+  existingExternalUserSharingOnly: 'Existing guests only',
+  externalUserSharingOnly: 'New and existing guests',
+  externalUserAndGuestSharing: 'Anyone — anonymous links allowed',
+};
 
 function sensBadge(label) {
   if (label === 'Highly Confidential') return '<span class="badge badge-danger">Highly Confidential</span>';
@@ -619,6 +628,8 @@ async function pageSettings() {
           ${s.graph.lastSync ? ` Last sync: ${ago(s.graph.lastSync)}.` : ''}
           Sync is read-only — remediation actions apply to the local model only.
         </p>
+        ${s.tenantSharing ? `<p class="muted" style="font-size:12px">Tenant-wide sharing policy: <strong>${esc(TENANT_SHARING_LABEL[s.tenantSharing] ?? s.tenantSharing)}</strong>
+          — per-site values on the Sites page reflect observed evidence (guests, anonymous links), since Graph does not expose per-site sharing settings.</p>` : ''}
       </div>
       <div>
         <div class="card">
